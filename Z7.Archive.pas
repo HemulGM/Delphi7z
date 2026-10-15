@@ -1,4 +1,4 @@
-﻿unit Z7.Archive.SevenZip;
+﻿unit Z7.Archive;
 
 // 7z container reader. All decoding is native Pascal; no DLLs or processes.
 // See https://github.com/ip7z/7zip/blob/main/DOC/7zFormat.txt.
