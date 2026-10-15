@@ -14,7 +14,7 @@ procedure DecodeLzma(Input, Output: TStream; PackedSize, UnpackedSize: Int64; co
 
 implementation
 
-{$Q-} // Range coder and distance arithmetic use unsigned modular operations.
+{$Q+}{$R+}
 
 type
   TLzmaDecoder = class

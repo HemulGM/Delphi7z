@@ -12,7 +12,7 @@ implementation
 
 uses Z7.Archive.Lzma;
 
-{$Q-} // Branch offsets intentionally wrap modulo 2^32.
+{$Q+}{$R+}
 
 function IsSignByte(B: Byte): Boolean;
 begin
@@ -55,11 +55,11 @@ begin
     begin
       Src := Read32(Data, Pos + 1);
       repeat
-        Dest := Src - (IP + Cardinal(Pos) + 5);
+        Dest := Cardinal((Int64(Src) - IP - Pos - 5) and $FFFFFFFF);
         if Mask = 0 then Break;
         Index := BitNumber[Mask] * 8;
         if not IsSignByte(Byte((Dest shr (24 - Index)) and $FF)) then Break;
-        Src := Dest xor ((Cardinal(1) shl (32 - Index)) - 1);
+        Src := Dest xor Cardinal((UInt64(1) shl (32 - Index)) - 1);
       until False;
       Data[Pos + 1] := Byte(Dest and $FF);
       Data[Pos + 2] := Byte((Dest shr 8) and $FF);
@@ -122,7 +122,7 @@ begin
     else
       Done := BCJ(Data, N, IP, State);
     Destination.WriteBuffer(Data[0], Done);
-    Inc(IP, Cardinal(Done));
+    IP := Cardinal((UInt64(IP) + Cardinal(Done)) and $FFFFFFFF);
     Carry := N - Done;
     if Carry > 0 then Move(Data[Done], Data[0], Carry);
   end;
