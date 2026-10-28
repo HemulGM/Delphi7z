@@ -478,9 +478,9 @@ begin
         begin
           ResetDictionary;
           NeedInit := $C0;
-        end
-        else if NeedInit < $A0 then
-          NeedInit := $A0;
+        end;
+        // Copy control 02 preserves LZMA state and properties. Only a
+        // dictionary reset (01) requires new properties before LZMA resumes.
         if U > UnpackedSize - FWritten then
           Fail('LZMA2 copy exceeds output size');
         for I := 1 to U do
