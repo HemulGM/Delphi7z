@@ -5,7 +5,7 @@
 interface
 
 uses
-  System.SysUtils, System.Classes, Z7.Archive.Lzma;
+  System.SysUtils, System.Classes, System.Generics.Collections, Z7.Archive.Lzma;
 
 type
   TSevenZipEntry = record
@@ -50,10 +50,12 @@ type
     FInput: TFileStream;
     FSpool: TFileStream;
     FTempName: string;
+    FTemporaryFiles: TList<string>;
     FEntries: TArray<TSevenZipEntry>;
     FStreams: TStreams;
     FCancel: TFunc<Boolean>;
     FPrepared: Boolean;
+    FMaxFileEntries: Integer;
     procedure CheckCancel;
     procedure ReadHeader;
     procedure ReadStreams(Reader: TObject; out Streams: TStreams);
@@ -62,7 +64,7 @@ type
     procedure Prepare;
     function GetEntries: TArray<TSevenZipEntry>;
   public
-    constructor Create(const FileName: string; Cancel: TFunc<Boolean> = nil);
+    constructor Create(const FileName: string; Cancel: TFunc<Boolean> = nil; MaxFileEntries: Integer = 1000000);
     destructor Destroy; override;
     // Extracts to the caller's stream, so archive names never become disk paths.
     procedure Extract(Index: Integer; Destination: TStream);
@@ -75,7 +77,7 @@ function OpenSevenZipInput(const FileName: string; out ContentSize: Int64; Cance
 implementation
 
 uses
-  System.IOUtils, System.Generics.Collections, System.Generics.Defaults,
+  System.IOUtils, System.Generics.Defaults,
   Z7.Archive.Filters;
 
 const
@@ -87,8 +89,9 @@ type
   private
     FData: TBytes;
     FPosition: Integer;
+    FMaxItems: Integer;
   public
-    constructor Create(const Data: TBytes);
+    constructor Create(const Data: TBytes; MaxItemCount: Integer = 1000000);
     function ByteValue: Byte;
     function Number: Int64;
     function Count: Integer;
@@ -191,10 +194,11 @@ begin
   end;
 end;
 
-constructor THeaderReader.Create(const Data: TBytes);
+constructor THeaderReader.Create(const Data: TBytes; MaxItemCount: Integer);
 begin
   inherited Create;
   FData := Data;
+  FMaxItems := MaxItemCount;
 end;
 
 function THeaderReader.ByteValue: Byte;
@@ -236,7 +240,7 @@ var
   N: Int64;
 begin
   N := Number;
-  if N > MaxItems then
+  if N > FMaxItems then
     Invalid('header item limit exceeded');
   Result := Integer(N);
 end;
@@ -480,7 +484,7 @@ begin
       for I := 0 to High(Streams.Folders) do
       begin
         N := R.Count;
-        if N > MaxItems - Total then
+        if N > FMaxFileEntries - Total then
           Invalid('too many substreams');
         Inc(Total, N);
         SetLength(Streams.Folders[I].SubSizes, N);
@@ -551,6 +555,7 @@ var
 begin
   R := THeaderReader(Reader);
   N := R.Count;
+  if N > FMaxFileEntries then Invalid('archive contains too many entries');
   SetLength(FEntries, N);
   SetLength(Empty, N);
   SetLength(Seen, 256);
@@ -563,7 +568,7 @@ begin
     if Seen[ID] then
       Invalid('duplicate file property');
     Seen[ID] := True;
-    P := THeaderReader.Create(R.Bytes(R.Number));
+    P := THeaderReader.Create(R.Bytes(R.Number), FMaxFileEntries);
     try
       case ID of
         14:
@@ -667,7 +672,7 @@ begin
     Invalid('invalid signature');
   if Signature[6] <> 0 then
     Invalid('unsupported archive version');
-  Start := THeaderReader.Create(Copy(Signature, 8, 24));
+  Start := THeaderReader.Create(Copy(Signature, 8, 24), FMaxFileEntries);
   try
     Expected := Start.UInt32;
     if CRCBytes(Signature, 12, 20) <> Expected then
@@ -693,7 +698,7 @@ begin
   FInput.ReadBuffer(Data, Length(Data));
   if CRCBytes(Data, 0, Length(Data)) <> Expected then
     Invalid('next header CRC mismatch');
-  R := THeaderReader.Create(Data);
+  R := THeaderReader.Create(Data, FMaxFileEntries);
   try
     ID := R.ByteValue;
     if ID = 23 then
@@ -718,7 +723,7 @@ begin
         Mem.Free;
       end;
       FreeAndNil(R);
-      R := THeaderReader.Create(Decoded);
+      R := THeaderReader.Create(Decoded, FMaxFileEntries);
       ID := R.ByteValue;
     end;
     if ID <> 1 then
@@ -866,9 +871,13 @@ begin
   end;
 end;
 
-constructor TSevenZipArchive.Create(const FileName: string; Cancel: TFunc<Boolean>);
+constructor TSevenZipArchive.Create(const FileName: string; Cancel: TFunc<Boolean>; MaxFileEntries: Integer);
 begin
   inherited Create;
+  if (MaxFileEntries < 0) or (MaxFileEntries > MaxItems) then
+    raise EArgumentOutOfRangeException.Create('MaxFileEntries');
+  FTemporaryFiles := TList<string>.Create;
+  FMaxFileEntries := MaxFileEntries;
   FCancel := Cancel;
   CheckCancel;
   FInput := TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite);
@@ -879,11 +888,19 @@ end;
 
 destructor TSevenZipArchive.Destroy;
 begin
-  FSpool.Free;
-  FInput.Free;
-  if FTempName <> '' then
-    TFile.Delete(FTempName);
-  inherited;
+  try
+    FSpool.Free;
+  finally
+    try
+      FInput.Free;
+    finally
+      if FTemporaryFiles <> nil then
+        for var Path in FTemporaryFiles do
+        try TFile.Delete(Path); except end;
+      FTemporaryFiles.Free;
+      inherited;
+    end;
+  end;
 end;
 
 procedure TSevenZipArchive.Prepare;
@@ -896,6 +913,8 @@ begin
   if FSpool <> nil then
     Invalid('archive decoding previously failed');
   FTempName := TPath.GetTempFileName;
+  FTemporaryFiles.Add(FTempName);
+  try
   FSpool := TFileStream.Create(FTempName, fmOpenReadWrite or fmShareExclusive);
   DecodeStreams(FStreams, FSpool);
   for I := 0 to High(FEntries) do
@@ -906,6 +925,14 @@ begin
         Invalid('file CRC mismatch: ' + FEntries[I].Name);
     end;
   FPrepared := True;
+  except
+    FreeAndNil(FSpool);
+    try TFile.Delete(FTempName); except end;
+    // All spool names stay tracked even if an antivirus/file lock delays
+    // deletion. A cancelled decode may safely retry with a fresh spool.
+    FTempName := '';
+    raise;
+  end;
 end;
 
 function TSevenZipArchive.GetEntries: TArray<TSevenZipEntry>;
