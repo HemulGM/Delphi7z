@@ -544,6 +544,8 @@ begin
 end;
 
 procedure TSevenZipArchive.ReadFiles(Reader: TObject);
+const
+  kDummy = $19;
 var
   R, P: THeaderReader;
   N, I, J, EmptyCount, E, F, Sub: Integer;
@@ -565,6 +567,14 @@ begin
     ID := R.ByteValue;
     if ID = 0 then
       Break;
+    // 7-Zip can align several file properties using separate kDummy blocks.
+    if ID = kDummy then
+    begin
+      for var Padding in R.Bytes(R.Number) do
+        if Padding <> 0 then
+          Invalid('nonzero file property padding');
+      Continue;
+    end;
     if Seen[ID] then
       Invalid('duplicate file property');
     Seen[ID] := True;
